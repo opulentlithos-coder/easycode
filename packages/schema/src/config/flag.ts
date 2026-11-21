@@ -26,7 +26,9 @@ export const registry = {
     "Load a personal config dir for each project from ~/.config/opencode/project/<project-id>/, read like an extra .opencode dir that ranks above the repo's own, and let home memory keep the skills it builds for the user there.",
   sqlite_fts:
     "Build an SQLite full-text index of session titles and message text in the background, and enable the opencode.session.search and opencode.session.read tools. The index covers every session in the database and starts while any loaded location enables it; SQLite keeps it current from then on, also after this is turned off.",
+  hybrid_advisor:
+    "Let the session's model, typically a small local one, consult a larger expert model for steps and commands through the ask_expert tool, run them itself, and save the verified steps as learned skills. Off by default in every build; opt in with OPENCODE_FLAGS=hybrid_advisor or experimental.hybrid_advisor: true, and set experimental.hybrid.expert.",
 } as const satisfies Record<string, string>
 export type Key = keyof typeof registry
 
-export const optInOnly: ReadonlySet<Key> = new Set(["todo"])
+export const optInOnly: ReadonlySet<Key> = new Set(["todo", "hybrid_advisor"])

@@ -2652,8 +2652,20 @@ export type ConfigEntry =
           home_memory?: boolean
           project_overlay?: boolean
           sqlite_fts?: boolean
+          hybrid_advisor?: boolean
           part_rows?: boolean
           image_generate?: boolean | { model?: string | { providerID: string; model: string; variant?: string } }
+          hybrid?: {
+            expert?: string | { providerID: string; model: string; variant?: string }
+            delegate_agent?: string
+            max_consults_per_turn?: number
+            max_consults_per_session?: number
+            escalate_after?: number
+            learn?: boolean
+            skills_directory?: string
+            trace?: "off" | "basic" | "full"
+            trace_retention_days?: number
+          }
           subagent_depth?: number
           location_idle_timeout?: string | false
           policies?: Array<{

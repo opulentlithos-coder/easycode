@@ -12,6 +12,15 @@ export const PrintLogs = GlobalFlag.Setting("print-logs")({
   ),
 })
 
+export const HybridTrace = GlobalFlag.Setting("hybrid-trace")({
+  flag: Flag.Literals("hybrid-trace", ["off", "basic", "full"]).pipe(
+    Flag.withDescription(
+      "Trace the hybrid advisor (ask_expert, learned skills) for this run: basic or full. Uses a private server so the setting reaches it",
+    ),
+    Flag.optional,
+  ),
+})
+
 export const Standalone = GlobalFlag.Setting("standalone")({
   flag: Flag.Boolean("standalone").pipe(
     Flag.withDescription("Run with a private server instead of the background service"),
@@ -341,6 +350,39 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
           description: "Remove a plugin from global configuration",
           params: {
             package: Argument.String("package").pipe(Argument.withDescription("configured package specifier")),
+          },
+        }),
+      ],
+    }),
+    Spec.make("hybrid", {
+      description: "Inspect hybrid advisor traces: what the local model asked, what the expert answered, and learned skills",
+      commands: [
+        Spec.make("report", {
+          description: "Print a summary and the latest turn's timeline",
+          params: {
+            session: Flag.String("session").pipe(
+              Flag.withAlias("s"),
+              Flag.withDescription("Session ID to show; defaults to the most recently traced session"),
+              Flag.optional,
+            ),
+            turns: Flag.Int("turns").pipe(
+              Flag.withSchema(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
+              Flag.withDescription("Number of recent turns to show"),
+              Flag.withDefault(1),
+            ),
+          },
+        }),
+        Spec.make("dashboard", {
+          description: "Write an HTML dashboard of all hybrid traces and open it",
+          params: {
+            out: Flag.String("out").pipe(
+              Flag.withDescription("Where to write the HTML file; defaults to the hybrid data folder"),
+              Flag.optional,
+            ),
+            open: Flag.Boolean("open").pipe(
+              Flag.withDescription("Open the dashboard in a browser"),
+              Flag.withDefault(true),
+            ),
           },
         }),
       ],

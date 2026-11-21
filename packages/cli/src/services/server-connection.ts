@@ -2,7 +2,7 @@ import { Service, type Endpoint, type EnsureOptions } from "@opencode/client/eff
 import { ClientError, isUnauthorizedError, OpenCode } from "@opencode/client/promise"
 import { OPENCODE_VERSION } from "../version"
 import { Effect, Option, Redacted } from "effect"
-import { Server as ServerFlag, Standalone as StandaloneFlag } from "../commands/commands"
+import { HybridTrace, Server as ServerFlag, Standalone as StandaloneFlag } from "../commands/commands"
 import { Env } from "../env"
 import { ServiceConfig } from "./service-config"
 import { Standalone } from "./standalone"
@@ -28,9 +28,15 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
   const serverFlag = yield* Effect.serviceOption(ServerFlag).pipe(Effect.map(Option.flatten))
   const standaloneFlag = yield* Effect.serviceOption(StandaloneFlag)
   const server = args.server ?? Option.getOrUndefined(serverFlag)
-  const standalone = args.standalone ?? Option.getOrElse(standaloneFlag, () => false)
+  // The background service was started with its own environment, so a traced run gets a private server.
+  const traced = Option.isSome(Option.flatten(yield* Effect.serviceOption(HybridTrace)))
+  const standalone = args.standalone ?? (Option.getOrElse(standaloneFlag, () => false) || (traced && server === undefined))
   if (server !== undefined && standalone)
     return yield* Effect.fail(new Error("--server and --standalone cannot be combined"))
+  if (server !== undefined && traced)
+    process.stderr.write(
+      "Warning: --hybrid-trace cannot reach a server started elsewhere; use /hybrid-trace in the session instead.\n",
+    )
   if (server !== undefined) {
     const password = yield* Env.password
     const endpoint = {

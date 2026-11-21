@@ -17737,6 +17737,9 @@
               "sqlite_fts": {
                 "type": "boolean"
               },
+              "hybrid_advisor": {
+                "type": "boolean"
+              },
               "part_rows": {
                 "type": "boolean"
               },
@@ -17779,6 +17782,72 @@
                     "additionalProperties": false
                   }
                 ]
+              },
+              "hybrid": {
+                "type": "object",
+                "properties": {
+                  "expert": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[^/#]+\\/[^#]+(?:#[^#]+)?$"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "providerID": {
+                            "type": "string",
+                            "pattern": "^[^/#]+$"
+                          },
+                          "model": {
+                            "type": "string",
+                            "pattern": "^[^#]+$"
+                          },
+                          "variant": {
+                            "type": "string",
+                            "pattern": "^[^#]+$"
+                          }
+                        },
+                        "required": ["providerID", "model"],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "delegate_agent": {
+                    "type": "string"
+                  },
+                  "max_consults_per_turn": {
+                    "type": "integer",
+                    "maximum": 9007199254740991,
+                    "exclusiveMinimum": 0
+                  },
+                  "max_consults_per_session": {
+                    "type": "integer",
+                    "maximum": 9007199254740991,
+                    "exclusiveMinimum": 0
+                  },
+                  "escalate_after": {
+                    "type": "integer",
+                    "maximum": 9007199254740991,
+                    "exclusiveMinimum": 0
+                  },
+                  "learn": {
+                    "type": "boolean"
+                  },
+                  "skills_directory": {
+                    "type": "string"
+                  },
+                  "trace": {
+                    "type": "string",
+                    "enum": ["off", "basic", "full"]
+                  },
+                  "trace_retention_days": {
+                    "type": "integer",
+                    "maximum": 9007199254740991,
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "additionalProperties": false
               },
               "subagent_depth": {
                 "type": "integer",

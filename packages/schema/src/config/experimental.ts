@@ -1,7 +1,7 @@
 export * as ConfigExperimental from "./experimental.js"
 
 import { Record, Schema } from "effect"
-import { NonNegativeInt, optional } from "../schema.js"
+import { NonNegativeInt, PositiveInt, optional } from "../schema.js"
 import { ConfigFlag } from "./flag.js"
 import { ConfigModel } from "./model.js"
 import { ConfigPolicy } from "./policy.js"
@@ -55,6 +55,45 @@ export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
     .annotate({
       description:
         "Settings for the experimental_image_generate tool, which is offered while a connected provider has an image model.",
+    }),
+  hybrid: Schema.Struct({
+    expert: ConfigModel.Selection.pipe(optional).annotate({
+      description:
+        "Model the session's model consults through the ask_expert tool, as providerID/modelID. Required for the tool to be offered.",
+    }),
+    delegate_agent: Schema.String.pipe(optional).annotate({
+      description:
+        "Subagent the session's model is told to hand a task to when it still fails after the expert's steps, such as an agent configured with the expert model and normal tools.",
+    }),
+    max_consults_per_turn: PositiveInt.pipe(optional).annotate({
+      description: "Most ask_expert calls a single user turn may make. Defaults to 3.",
+    }),
+    max_consults_per_session: PositiveInt.pipe(optional).annotate({
+      description: "Most ask_expert calls a session may make. Defaults to 10.",
+    }),
+    escalate_after: PositiveInt.pipe(optional).annotate({
+      description:
+        "Failed tool calls of the same command, or consecutive failed tool calls, before the model is reminded to ask the expert or delegate. Defaults to 2.",
+    }),
+    learn: Schema.Boolean.pipe(optional).annotate({
+      description: "Save the verified steps of a turn that consulted the expert as a learned skill. Defaults to true.",
+    }),
+    skills_directory: Schema.String.pipe(optional).annotate({
+      description: "Directory for learned skills, one <name>/SKILL.md each. Defaults to <config>/skills/learned.",
+    }),
+    trace: Schema.Literals(["off", "basic", "full"])
+      .pipe(optional)
+      .annotate({
+        description:
+          'Default trace level for hybrid runs: "basic" records every event with text previews, "full" records full (redacted) questions, answers and outputs. OPENCODE_HYBRID_TRACE and the /hybrid-trace command override it. Defaults to "off".',
+      }),
+    trace_retention_days: PositiveInt.pipe(optional).annotate({
+      description: "Days to keep hybrid trace files. Defaults to 30.",
+    }),
+  })
+    .pipe(optional)
+    .annotate({
+      description: `Settings for the hybrid advisor (flag hybrid_advisor): ${ConfigFlag.registry.hybrid_advisor}`,
     }),
   subagent_depth: NonNegativeInt.pipe(optional).annotate({
     description: "Maximum subagent nesting depth. Defaults to 1.",
