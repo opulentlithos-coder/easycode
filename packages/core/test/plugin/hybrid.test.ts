@@ -80,6 +80,37 @@ describe("HybridExpert", () => {
     expect(text).toContain("~/project")
   })
 
+  test("parses a review, keeping at most five non-empty lessons", () => {
+    const review = HybridExpert.parseReview(
+      'Verdict below.\n{"verdict":"partial","score":0.6,"reason":"Installed but not verified.","lessons":["Run py --version after winget.","", "a","b","c","d","e"]}',
+    )
+    expect(review).toEqual({
+      verdict: "partial",
+      score: 0.6,
+      reason: "Installed but not verified.",
+      lessons: ["Run py --version after winget.", "a", "b", "c", "d"],
+    })
+    expect(HybridExpert.parseReview('{"verdict":"maybe"}')).toBeUndefined()
+    expect(HybridExpert.parseReview('{"verdict":"failed"}')).toEqual({ verdict: "failed", reason: "", lessons: [] })
+  })
+
+  test("builds a review prompt from the task, the plans and the escaped tool output", () => {
+    const prompt = HybridExpert.reviewPrompt({
+      environment: env,
+      task: "python install karo",
+      plans: [["pln_1", plan]],
+      executed: [
+        { actor: "local", summary: "python --version", ok: false, output: "<not recognized>" },
+        { actor: "local", summary: "py --version", ok: true, output: "Python 3.13.1" },
+      ],
+    })
+    expect(prompt).toContain("Environment: win32 x64, shell powershell")
+    expect(prompt).toContain('<plan id="pln_1">')
+    expect(prompt).toContain("1. [FAILED] (local) python --version\n   &lt;not recognized&gt;")
+    expect(prompt).toContain("2. [ok] (local) py --version\n   Python 3.13.1")
+    expect(prompt).not.toContain("${")
+  })
+
   test("keeps the last lines of a long output", () => {
     const output = Array.from({ length: 100 }, (_, index) => `line ${index}`).join("\n")
     const kept = HybridExpert.tail(output, 3)
@@ -172,10 +203,44 @@ describe("HybridLearned", () => {
     expect(text).toContain("## Pitfalls")
   })
 
-  test("round-trips its bookkeeping and rejects malformed files", () => {
+  test("round-trips its bookkeeping, reads files from before lessons and feedback, and rejects malformed files", () => {
     const skill = HybridLearned.build(turn())!
     expect(HybridLearned.parseMeta(JSON.parse(JSON.stringify(skill)))).toEqual(skill)
+    const older = JSON.parse(JSON.stringify(skill))
+    delete older.lessons
+    delete older.feedback
+    expect(HybridLearned.parseMeta(older)).toEqual(skill)
     expect(HybridLearned.parseMeta({ id: "x" })).toBeUndefined()
+  })
+
+  test("adds review lessons once each and renders them", () => {
+    const skill = HybridLearned.build(turn())!
+    const learned = HybridLearned.learn(HybridLearned.learn(skill, ["Run py --version after winget."]), [
+      "Run py --version after winget.",
+      "Use py, not python, on a fresh install.",
+    ])
+    expect(learned.lessons).toEqual(["Run py --version after winget.", "Use py, not python, on a fresh install."])
+    expect(HybridLearned.markdown(learned)).toContain("## Lessons\n- Run py --version after winget.")
+    expect(HybridLearned.learn(skill, [])).toBe(skill)
+  })
+
+  test("user ratings retire a refuted new skill, trust a confirmed one, and keep notes", () => {
+    const skill = HybridLearned.build(turn())!
+    const refuted = HybridLearned.feedback(skill, "bad", "It installed 3.12, not 3.13", 2_000)
+    expect(refuted).toMatchObject({ status: "retired", feedback: { good: 0, partial: 0, bad: 1 } })
+    expect(refuted.pitfalls.at(-1)).toBe("User: It installed 3.12, not 3.13")
+
+    const trusted = [1, 2].reduce((meta, now) => HybridLearned.feedback(meta, "good", undefined, now), skill)
+    expect(trusted).toMatchObject({ status: "trusted", verified_at: 2, feedback: { good: 2, bad: 0 } })
+    expect(HybridLearned.markdown(trusted)).toContain("User ratings: 2 good, 0 partial, 0 bad.")
+
+    const used = HybridLearned.record(skill, "win", 1)
+    expect(HybridLearned.feedback(used, "bad", undefined, 2).status).toBe("candidate")
+    expect(HybridLearned.feedback(used, "partial", "slow", 2)).toMatchObject({ status: "candidate", pitfalls: [...used.pitfalls, "User: slow"] })
+    expect(HybridLearned.feedback(refuted, "good", "works now", 3)).toMatchObject({ status: "retired" })
+    expect(
+      HybridLearned.feedback(HybridLearned.feedback(refuted, "good", undefined, 3), "good", "works now", 4),
+    ).toMatchObject({ status: "candidate", lessons: ["User: works now"] })
   })
 })
 
@@ -246,6 +311,8 @@ describe("HybridPlugin.readSettings", () => {
       escalateAfter: 2,
       learn: true,
       skillsDirectory: path.join("/data", "hybrid", "skills"),
+      review: "consulted",
+      humanFeedback: "manual",
       retentionDays: 30,
     })
   })
@@ -254,7 +321,8 @@ describe("HybridPlugin.readSettings", () => {
     const settings = HybridPlugin.readSettings(
       [
         document({ expert: Schema.decodeUnknownSync(ConfigModel.Selection)("anthropic/claude"), max_consults_per_turn: 5 }),
-        document({ trace: "full", learn: false }),
+        document({ trace: "full", learn: false, review: "always" }),
+        document({ human_feedback: "learned" }),
       ],
       "/data",
     )
@@ -263,6 +331,8 @@ describe("HybridPlugin.readSettings", () => {
       perTurn: 5,
       trace: "full",
       learn: false,
+      review: "always",
+      humanFeedback: "learned",
     })
   })
 })

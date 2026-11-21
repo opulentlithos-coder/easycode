@@ -5,6 +5,7 @@ import { define } from "@opencode/plugin/effect/plugin"
 import type { Entry } from "@opencode/schema/config"
 import type { ConfigModel } from "@opencode/schema/config/model"
 import { Model } from "@opencode/schema/model"
+import { SessionMessage } from "@opencode/schema/session-message"
 import { Tool } from "@opencode/schema/tool"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
@@ -28,6 +29,16 @@ const CONTEXT_LIMIT = 4_000
 const PLAN_PREFIX = "plan:"
 const CACHE_PREFIX = "cache:"
 const TRACE_PREFIX = "trace:"
+const FEEDBACK_HEADER = "Hybrid feedback"
+const RATINGS = { Worked: "good", Partly: "partial", Failed: "bad" } as const
+const COMMAND_RATINGS: Record<string, HybridLearned.Rating | undefined> = {
+  good: "good",
+  worked: "good",
+  partial: "partial",
+  partly: "partial",
+  bad: "bad",
+  failed: "bad",
+}
 
 const Input = Schema.Struct({
   question: Schema.String.annotate({
@@ -76,6 +87,8 @@ interface SessionState {
   turn?: Turn
   /** Set on a delegate subagent's session: its tool calls feed the parent's turn. */
   parent?: string
+  /** The last finished turn, which the user's rating applies to. */
+  last?: { readonly turnID: string; readonly skill?: string; asked: boolean }
 }
 
 export const Plugin = define({
@@ -299,6 +312,88 @@ export const Plugin = define({
       return result.text
     })
 
+    // The expert judges a finished turn from its real tool output; undefined when it can't.
+    const review = Effect.fn("HybridPlugin.review")(function* (
+      sessionID: string,
+      turn: Turn,
+      expert: NonNullable<Settings["expert"]>,
+    ) {
+      const model = modelRef(expert)
+      const started = yield* Clock.currentTimeMillis
+      const text = yield* ask(
+        HybridExpert.reviewPrompt({
+          environment: environment(),
+          task: HybridExpert.redact(turn.prompt, global.home),
+          plans: Array.from(turn.plans.entries()),
+          executed: turn.executed.map((item) => ({ ...item, summary: HybridExpert.redact(item.summary, global.home) })),
+        }),
+        model,
+      ).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.interrupt
+            : emit({
+                sessionID,
+                turnID: turn.id,
+                actor: "expert",
+                type: "expert.review_failed",
+                data: { model: `${model.providerID}/${model.id}`, error: Cause.pretty(cause).slice(0, 500) },
+              }).pipe(Effect.as(undefined)),
+        ),
+      )
+      if (text === undefined) return undefined
+      const parsed = HybridExpert.parseReview(text)
+      yield* emit({
+        sessionID,
+        turnID: turn.id,
+        actor: "expert",
+        type: "expert.reviewed",
+        durationMs: (yield* Clock.currentTimeMillis) - started,
+        data: {
+          model: `${model.providerID}/${model.id}`,
+          parse_ok: Boolean(parsed),
+          verdict: parsed?.verdict ?? null,
+          score: parsed?.score ?? null,
+          reason: parsed?.reason ?? null,
+          lessons: parsed?.lessons ?? [],
+          text: parsed ? null : text,
+        },
+      })
+      return parsed
+    })
+
+    // A user's rating of the session's last finished turn, and of the skill that turn made or used.
+    const rate = Effect.fn("HybridPlugin.rate")(function* (
+      sessionID: string,
+      rating: HybridLearned.Rating,
+      note: string | undefined,
+      source: "question" | "command",
+    ) {
+      const last = sessions.get(sessionID)?.last
+      if (!last) return undefined
+      last.asked = false
+      const skill = last.skill ? learned.get(last.skill) : undefined
+      const redacted = note ? HybridExpert.redact(note, global.home) : undefined
+      const next = skill ? HybridLearned.feedback(skill, rating, redacted, yield* Clock.currentTimeMillis) : undefined
+      const file = next ? yield* save(next) : undefined
+      yield* emit({
+        sessionID,
+        turnID: last.turnID,
+        actor: "user",
+        type: "human.feedback",
+        data: {
+          rating,
+          note: redacted ?? null,
+          source,
+          skill_id: skill?.id ?? null,
+          path: file ?? null,
+          status: skill && next ? { from: skill.status, to: next.status } : null,
+          feedback: next?.feedback ?? null,
+        },
+      })
+      return { skill: next }
+    })
+
     yield* ctx.tool.transform((editor) => {
       editor.add({
         name: TOOL,
@@ -343,11 +438,7 @@ export const Plugin = define({
                   output: HybridExpert.tail(HybridExpert.redact(input.failed_step.output, global.home)),
                 }
               : undefined
-            const model = Model.Ref.make({
-              providerID: current.expert.providerID,
-              id: current.expert.model,
-              ...(current.expert.variant ? { variant: current.expert.variant } : {}),
-            })
+            const model = modelRef(current.expert)
             const key =
               previous || failed
                 ? undefined
@@ -465,6 +556,13 @@ export const Plugin = define({
     yield* ctx.tool.hook("execute.after", (event) =>
       Effect.gen(function* () {
         if (event.tool === TOOL) return
+        const answer = event.status === "completed" ? feedbackAnswer(event.input, event.result.output) : undefined
+        if (answer !== undefined) {
+          if (!sessions.get(event.sessionID)?.last?.asked) return
+          const option = Object.keys(RATINGS).some((label) => label.toLowerCase() === answer.trim().toLowerCase())
+          yield* rate(event.sessionID, ratingOf(answer), option ? undefined : answer, "question")
+          return
+        }
         const current = yield* settings
         const turn = turnOf(event.sessionID)
         if (!turn || turn.finished) return
@@ -546,11 +644,18 @@ export const Plugin = define({
         turn.finished = true
         const now = yield* Clock.currentTimeMillis
         const after = turn.executed.slice(turn.executedAtLastConsult)
-        const success = (turn.executed.at(-1)?.ok ?? true) && (turn.consults === 0 || after.some((item) => item.ok))
         const helped = turn.consults > 0 || turn.delegated
         const handledBy = turn.delegated ? "delegate" : turn.consults > 0 ? "expert-advice" : turn.skill ? "skill" : "local"
+        const reviewing =
+          turn.executed.length > 0 && (current.review === "always" || (current.review === "consulted" && helped))
+        const verdict = reviewing && current.expert ? yield* review(event.sessionID, turn, current.expert) : undefined
+        // The expert's verdict, when there is one, replaces the guess from the last exit codes.
+        const success = verdict
+          ? verdict.verdict !== "failed"
+          : (turn.executed.at(-1)?.ok ?? true) && (turn.consults === 0 || after.some((item) => item.ok))
+        const lessons = verdict?.lessons ?? []
 
-        const built =
+        const fresh =
           current.learn && helped && success
             ? HybridLearned.build({
                 sessionID: event.sessionID,
@@ -564,12 +669,16 @@ export const Plugin = define({
                 now,
               })
             : undefined
+        const built = fresh && HybridLearned.learn(fresh, lessons)
         const used = turn.skill ? learned.get(turn.skill) : undefined
 
         if (used) {
           const outcome = success && !helped ? "win" : turn.delegated ? "escalated" : "loss"
           const counted = HybridLearned.record(used, outcome, now)
-          const next = built ? HybridLearned.merge(counted, { ...built, id: used.id, name: used.name }) : counted
+          const next = HybridLearned.learn(
+            built ? HybridLearned.merge(counted, { ...built, id: used.id, name: used.name }) : counted,
+            lessons,
+          )
           const file = yield* save(next)
           yield* emit({
             sessionID: event.sessionID,
@@ -586,6 +695,7 @@ export const Plugin = define({
               version: next.version,
               steps: built?.steps ?? [],
               pitfalls: built?.pitfalls ?? [],
+              lessons,
             },
           })
         }
@@ -605,6 +715,7 @@ export const Plugin = define({
               env: next.env,
               steps: built.steps,
               pitfalls: built.pitfalls,
+              lessons,
               evidence: turn.executed.map((item) => ({ actor: item.actor, tool: item.tool, step: item.summary, ok: item.ok })),
               plans: Array.from(turn.plans.keys()),
             },
@@ -625,7 +736,31 @@ export const Plugin = define({
             failed_steps: turn.executed.filter((item) => !item.ok).length,
             skill_id: turn.skill ?? null,
             learned: built?.id ?? null,
+            verdict: verdict?.verdict ?? null,
           },
+        })
+
+        const touched = used?.id ?? built?.id
+        const asking =
+          current.humanFeedback === "always"
+            ? helped || touched !== undefined
+            : current.humanFeedback === "learned" && touched !== undefined
+        state(event.sessionID).last = { turnID: turn.id, ...(touched ? { skill: touched } : {}), asked: asking }
+        if (!asking) return
+        // Admitted from the idle hook, so the model asks in the same execution, before the session goes idle.
+        yield* ctx.session.synthetic({
+          sessionID: event.sessionID,
+          id: SessionMessage.ID.make(`msg_hybrid_feedback_${turn.id}`),
+          text: feedbackRequest(turn.prompt),
+          description: "Hybrid advisor: asking how it went",
+          metadata: { source: "hybrid", turnID: turn.id },
+        })
+        yield* emit({
+          sessionID: event.sessionID,
+          turnID: turn.id,
+          actor: "plugin",
+          type: "feedback.requested",
+          data: { mode: current.humanFeedback, skill_id: touched ?? null },
         })
       }).pipe(
         Effect.catchCause((cause) =>
@@ -657,6 +792,24 @@ export const Plugin = define({
             })
           }),
       })
+      editor.add({
+        name: "hybrid-feedback",
+        description: "rate the last hybrid advisor turn [good|partial|bad] [note]",
+        execute: (input) =>
+          Effect.gen(function* () {
+            if ((yield* settings).humanFeedback === "off")
+              return yield* Effect.fail(new Error("Hybrid feedback is off. Set experimental.hybrid.human_feedback to turn it on."))
+            const words = input.prompt.text.trim().split(/\s+/)
+            const rating = COMMAND_RATINGS[words[0]?.toLowerCase() ?? ""]
+            if (!rating)
+              return yield* Effect.fail(
+                new Error("Usage: /hybrid-feedback good|partial|bad [what went right or wrong]"),
+              )
+            const note = words.slice(1).join(" ")
+            const rated = yield* rate(input.sessionID, rating, note ? note : undefined, "command")
+            if (!rated) return yield* Effect.fail(new Error("There is no finished hybrid turn in this session to rate yet."))
+          }),
+      })
     })
 
     yield* ctx.event.subscribe({ types: ["session.deleted"] }).pipe(
@@ -680,6 +833,8 @@ export interface Settings {
   readonly escalateAfter: number
   readonly learn: boolean
   readonly skillsDirectory: string
+  readonly review: "off" | "consulted" | "always"
+  readonly humanFeedback: "off" | "manual" | "learned" | "always"
   readonly trace?: HybridTrace.Level
   readonly retentionDays: number
 }
@@ -702,6 +857,8 @@ export function readSettings(entries: ReadonlyArray<Entry>, data: string): Setti
     escalateAfter: last("escalate_after") ?? 2,
     learn: last("learn") ?? true,
     skillsDirectory: last("skills_directory") ?? path.join(data, "hybrid", "skills"),
+    review: last("review") ?? "consulted",
+    humanFeedback: last("human_feedback") ?? "manual",
     ...(trace ? { trace } : {}),
     retentionDays: last("trace_retention_days") ?? 30,
   }
@@ -718,6 +875,45 @@ const loadLearned = Effect.fn("HybridPlugin.loadLearned")(function* (fs: FSUtil.
   )
   return metas.filter((meta): meta is HybridLearned.Meta => meta !== undefined)
 })
+
+function modelRef(expert: NonNullable<Settings["expert"]>) {
+  return Model.Ref.make({
+    providerID: expert.providerID,
+    id: expert.model,
+    ...(expert.variant ? { variant: expert.variant } : {}),
+  })
+}
+
+/** A rating from the feedback question's answer: one of its options, or the user's own words. */
+function ratingOf(answer: string): HybridLearned.Rating {
+  const option = Object.entries(RATINGS).find(([label]) => label.toLowerCase() === answer.trim().toLowerCase())
+  if (option) return option[1]
+  // Negative phrases first, so "didn't work" is not read as "work".
+  if (/\b(fail(ed|s)?|bad|wrong|broken?|not work(ing)?|didn'?t work|nahi(n)? chala)\b/i.test(answer)) return "bad"
+  if (/\b(work(ed|s)?|good|great|done|yes|perfect|sahi|badhiya|chal gaya)\b/i.test(answer)) return "good"
+  return "partial"
+}
+
+function feedbackRequest(prompt: string) {
+  const task = prompt.replace(/\s+/g, " ").trim()
+  return [
+    "Before you stop, ask the user how the task you just worked on went. Call the question tool with exactly one question:",
+    `- header: "${FEEDBACK_HEADER}"`,
+    `- question: "How well did this go: ${(task.length > 120 ? `${task.slice(0, 119)}…` : task).replaceAll('"', "'")}?"`,
+    '- options: "Worked" (done and verified), "Partly" (some of it worked), "Failed" (it did not work)',
+    "After the answer, thank the user in one short line and stop. Don't change anything else.",
+  ].join("\n")
+}
+
+function feedbackAnswer(input: unknown, output: unknown) {
+  if (!isRecord(input) || !Array.isArray(input.questions) || !isRecord(output) || !Array.isArray(output.answers))
+    return undefined
+  const question: unknown = input.questions[0]
+  const answer: unknown = output.answers[0]
+  if (!isRecord(question) || question.header !== FEEDBACK_HEADER || !Array.isArray(answer)) return undefined
+  const text = answer.filter((item): item is string => typeof item === "string").join(", ")
+  return text ? text : undefined
+}
 
 function sameModel(ref: Model.Ref, expert: NonNullable<Settings["expert"]>) {
   return ref.providerID === expert.providerID && ref.id === expert.model

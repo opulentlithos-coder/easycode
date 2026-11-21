@@ -46,6 +46,9 @@ export function report(summary: HybridInsights.Summary, options: { readonly turn
         ].join(" · "),
     ...(handled ? [`handled by: ${handled}`] : []),
     `expert: ${kpis.consults} consult(s), ${kpis.cacheHits} cached, ${(kpis.expertMs / 1000).toFixed(1)}s · ${kpis.triggers} trigger(s)`,
+    ...(Object.keys(kpis.reviews).length || Object.keys(kpis.ratings).length
+      ? [`expert reviews: ${totals(kpis.reviews)} · user ratings: ${totals(kpis.ratings)}`]
+      : []),
     ...options.turns.flatMap((turn) => [
       "",
       `turn ${turn.turnID} (${turn.sessionID}) · ${turn.started.replace("T", " ").slice(0, 19)} · ${turn.outcome ?? "running"}${turn.handledBy ? ` · ${turn.handledBy}` : ""}${turn.durationMs === undefined ? "" : ` · ${(turn.durationMs / 1000).toFixed(1)}s`}`,
@@ -98,7 +101,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 <script>
 const input = JSON.parse(document.getElementById("data").textContent)
 const s = input.summary
-const COLORS = { local: "var(--local)", skill: "var(--skill)", "expert-advice": "var(--expert)", delegate: "var(--bad)", unknown: "var(--muted)" }
+const COLORS = { local: "var(--local)", skill: "var(--skill)", "expert-advice": "var(--expert)", delegate: "var(--bad)", unknown: "var(--muted)",
+  success: "var(--ok)", good: "var(--ok)", partial: "var(--warn)", failed: "var(--bad)", bad: "var(--bad)" }
 const el = (tag, props, ...children) => {
   const node = document.createElement(tag)
   Object.entries(props || {}).forEach(([key, value]) => key === "class" ? node.className = value : key.startsWith("on") ? node.addEventListener(key.slice(2), value) : node.setAttribute(key, value))
@@ -111,7 +115,7 @@ const when = (at) => at ? at.replace("T", " ").slice(0, 19) : ""
 const json = (v) => el("pre", {}, JSON.stringify(v, null, 2))
 document.getElementById("meta").textContent = "Generated " + when(input.generated) + " · " + s.sessions + " session(s) · traces: " + input.directory
 
-const tabs = { Overview: overview, Turns: turns, "Expert Q&A": qa, "Local performance": local, Skills: skills }
+const tabs = { Overview: overview, Turns: turns, "Expert Q&A": qa, "Local performance": local, Feedback: feedback, Skills: skills }
 let current = "Overview"
 function draw() {
   const nav = document.getElementById("tabs")
@@ -178,6 +182,21 @@ function local() {
     el("div", { class: "panel" }, el("h2", {}, "Handed to the expert"), delegated.length ? delegated.map((turn) => el("p", {}, when(turn.started) + " · " + turn.prompt)) : el("p", { class: "muted" }, "Nothing was delegated.")))
 }
 
+function feedback() {
+  const rows = s.turns.filter((turn) => turn.review || turn.rating)
+  const summary = (title, counts) => el("div", { class: "card" }, el("span", {}, title),
+    el("div", { class: "legend" }, Object.keys(counts).length ? Object.entries(counts).map(([key, value]) => el("span", {}, el("i", { style: "background:" + (COLORS[key] || "var(--accent)") }), key + " " + value)) : el("span", { class: "muted" }, "none yet")))
+  return el("div", {},
+    el("div", { class: "cards" }, summary("Expert reviews of the local model's work", s.kpis.reviews), summary("User ratings", s.kpis.ratings)),
+    rows.length ? rows.map((turn) => el("div", { class: "panel" },
+      el("h2", {}, turn.prompt || turn.turnID),
+      el("p", { class: "muted" }, when(turn.started) + " · " + (turn.outcome || "running") + (turn.handledBy ? " · " + turn.handledBy : "")),
+      turn.review ? el("div", {}, el("b", { class: turn.review.verdict === "failed" ? "bad" : turn.review.verdict === "success" ? "ok" : "" }, "Expert: " + turn.review.verdict), " ", turn.review.reason,
+        turn.review.lessons.length ? el("ul", {}, turn.review.lessons.map((lesson) => el("li", {}, lesson))) : "") : "",
+      turn.rating ? el("p", {}, el("b", { class: turn.rating.rating === "bad" ? "bad" : turn.rating.rating === "good" ? "ok" : "" }, "User: " + turn.rating.rating), turn.rating.note ? " · " + turn.rating.note : "") : ""))
+      : el("p", { class: "muted" }, "No reviews or ratings yet. The expert reviews turns it helped with (experimental.hybrid.review); rate a turn with /hybrid-feedback good|partial|bad."))
+}
+
 function skills() {
   if (!s.skills.length) return el("p", { class: "muted" }, "No skills learned yet.")
   return el("div", {}, s.skills.map((skill) => {
@@ -188,6 +207,8 @@ function skills() {
       el("table", {}, el("tr", {}, el("th", {}, "When"), el("th", {}, "Event"), el("th", {}, "Details")),
         skill.events.map((event) => el("tr", {}, el("td", {}, when(event.at)), el("td", {}, event.type), el("td", {},
           event.data.outcome ? "outcome: " + event.data.outcome + " · " : "",
+          event.data.rating ? "user: " + event.data.rating + (event.data.note ? " (" + event.data.note + ")" : "") + " · " : "",
+          Array.isArray(event.data.lessons) && event.data.lessons.length ? el("pre", {}, "Lessons from the expert review:\\n" + event.data.lessons.join("\\n")) : "",
           event.data.version ? "v" + event.data.version + " · " : "",
           Array.isArray(event.data.steps) && event.data.steps.length ? el("pre", {}, "Steps:\\n" + event.data.steps.join("\\n") + (Array.isArray(event.data.pitfalls) && event.data.pitfalls.length ? "\\n\\nPitfalls:\\n" + event.data.pitfalls.join("\\n") : "")) : "",
           event.data.counters ? json(event.data.counters) : "")))))
@@ -199,6 +220,11 @@ draw()
 </body>
 </html>
 `
+}
+
+function totals(counts: Record<string, number>) {
+  const entries = Object.entries(counts)
+  return entries.length ? entries.map(([key, value]) => `${key} ${value}`).join(", ") : "none"
 }
 
 function percent(value: number | undefined) {

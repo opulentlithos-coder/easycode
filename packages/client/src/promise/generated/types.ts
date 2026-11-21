@@ -2663,6 +2663,8 @@ export type ConfigEntry =
             escalate_after?: number
             learn?: boolean
             skills_directory?: string
+            review?: "off" | "consulted" | "always"
+            human_feedback?: "off" | "manual" | "learned" | "always"
             trace?: "off" | "basic" | "full"
             trace_retention_days?: number
           }

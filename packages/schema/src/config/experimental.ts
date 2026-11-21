@@ -81,6 +81,18 @@ export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
     skills_directory: Schema.String.pipe(optional).annotate({
       description: "Directory for learned skills, one <name>/SKILL.md each. Defaults to <config>/skills/learned.",
     }),
+    review: Schema.Literals(["off", "consulted", "always"])
+      .pipe(optional)
+      .annotate({
+        description:
+          'When the expert reviews a finished turn from its real tool output: "consulted" after turns that asked it or delegated, "always" after every turn that ran tools, "off" never. Its verdict decides whether the turn counts as a success, and its lessons are added to the learned skill. Defaults to "consulted".',
+      }),
+    human_feedback: Schema.Literals(["off", "manual", "learned", "always"])
+      .pipe(optional)
+      .annotate({
+        description:
+          'How the user rates a turn: "manual" only with the /hybrid-feedback command, "learned" also asks after a turn that created, updated or used a learned skill, "always" also asks after every turn the expert, a delegate or a skill helped, "off" turns feedback off. Ratings move a skill between candidate, trusted and retired. Defaults to "manual".',
+      }),
     trace: Schema.Literals(["off", "basic", "full"])
       .pipe(optional)
       .annotate({

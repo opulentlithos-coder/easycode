@@ -17837,6 +17837,14 @@
                   "skills_directory": {
                     "type": "string"
                   },
+                  "review": {
+                    "type": "string",
+                    "enum": ["off", "consulted", "always"]
+                  },
+                  "human_feedback": {
+                    "type": "string",
+                    "enum": ["off", "manual", "learned", "always"]
+                  },
                   "trace": {
                     "type": "string",
                     "enum": ["off", "basic", "full"]

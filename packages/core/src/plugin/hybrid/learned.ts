@@ -1,6 +1,6 @@
 export * as HybridLearned from "./learned.js"
 
-import { Option, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 
 /** Bookkeeping kept beside each learned SKILL.md, so the skill file stays plain for the model. */
 export const Meta = Schema.Struct({
@@ -22,6 +22,11 @@ export const Meta = Schema.Struct({
   steps: Schema.Array(Schema.String),
   pitfalls: Schema.Array(Schema.String),
   summaries: Schema.Array(Schema.String),
+  // Older skill files have neither field.
+  lessons: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  feedback: Schema.Struct({ good: Schema.Int, partial: Schema.Int, bad: Schema.Int }).pipe(
+    Schema.withDecodingDefault(Effect.succeed({ good: 0, partial: 0, bad: 0 })),
+  ),
   trace: Schema.Array(Schema.Struct({ session_id: Schema.String, turn_id: Schema.String })),
 })
 export type Meta = typeof Meta.Type
@@ -50,6 +55,7 @@ export interface Turn {
 
 const MAX_EXAMPLES = 8
 const MAX_PITFALLS = 12
+const MAX_LESSONS = 10
 const MATCH_THRESHOLD = 0.34
 
 /** A new skill from a turn whose steps were verified by real tool output, or undefined when nothing ran. */
@@ -76,7 +82,43 @@ export function build(turn: Turn): Meta | undefined {
     steps,
     pitfalls: pitfalls(turn.executed),
     summaries: turn.summaries.slice(-3),
+    lessons: [],
+    feedback: { good: 0, partial: 0, bad: 0 },
     trace: [{ session_id: turn.sessionID, turn_id: turn.turnID }],
+  }
+}
+
+/** Adds the expert's review lessons to a skill, newest last. */
+export function learn(meta: Meta, lessons: ReadonlyArray<string>): Meta {
+  if (lessons.length === 0) return meta
+  return { ...meta, lessons: unique([...meta.lessons, ...lessons.map((item) => oneLine(item, 240))]).slice(-MAX_LESSONS) }
+}
+
+export type Rating = "good" | "partial" | "bad"
+
+/**
+ * Applies a user's rating. A "bad" rating outweighing the good ones retires the skill once it has two, or at once for a
+ * skill that has never been reused; two good ratings and no bad ones make a candidate trusted. A note becomes a lesson
+ * when the rating is good and a pitfall otherwise.
+ */
+export function feedback(meta: Meta, rating: Rating, note: string | undefined, now: number): Meta {
+  const counts = { ...meta.feedback, [rating]: meta.feedback[rating] + 1 }
+  const status =
+    counts.bad > counts.good && (counts.bad >= 2 || meta.uses === 0)
+      ? "retired"
+      : counts.good >= 2 && counts.bad === 0 && meta.status === "candidate"
+        ? "trusted"
+        : meta.status === "retired" && counts.good > counts.bad
+          ? "candidate"
+          : meta.status
+  const line = note?.trim() ? `User: ${oneLine(note, 200)}` : undefined
+  return {
+    ...meta,
+    feedback: counts,
+    status,
+    verified_at: rating === "good" ? now : meta.verified_at,
+    lessons: line && rating === "good" ? unique([...meta.lessons, line]).slice(-MAX_LESSONS) : meta.lessons,
+    pitfalls: line && rating !== "good" ? unique([...meta.pitfalls, line]).slice(-MAX_PITFALLS) : meta.pitfalls,
   }
 }
 
@@ -92,6 +134,7 @@ export function merge(existing: Meta, next: Meta): Meta {
     examples: unique([...existing.examples, ...next.examples]).slice(-MAX_EXAMPLES),
     pitfalls: unique([...existing.pitfalls, ...next.pitfalls]).slice(-MAX_PITFALLS),
     summaries: unique([...existing.summaries, ...next.summaries]).slice(-3),
+    lessons: unique([...existing.lessons, ...next.lessons]).slice(-MAX_LESSONS),
     trace: [...existing.trace, ...next.trace].slice(-20),
   }
 }
@@ -129,6 +172,9 @@ export function markdown(meta: Meta) {
     `# ${meta.name}`,
     "",
     `Learned from verified tool output (version ${meta.version}, ${meta.env.os} / ${meta.env.shell}, status ${meta.status}).`,
+    ...(meta.feedback.good + meta.feedback.partial + meta.feedback.bad > 0
+      ? [`User ratings: ${meta.feedback.good} good, ${meta.feedback.partial} partial, ${meta.feedback.bad} bad.`]
+      : []),
     ...(meta.executor === "expert"
       ? ["", "The local model failed this task repeatedly. Hand it to the expert or delegate agent instead of retrying."]
       : []),
@@ -138,6 +184,7 @@ export function markdown(meta: Meta) {
     "",
     "## Steps",
     ...meta.steps.map((step, index) => `${index + 1}. ${step}`),
+    ...(meta.lessons.length ? ["", "## Lessons", ...meta.lessons.map((item) => `- ${item}`)] : []),
     ...(meta.pitfalls.length ? ["", "## Pitfalls", ...meta.pitfalls.map((item) => `- ${item}`)] : []),
     ...(meta.summaries.length ? ["", "## Expert notes", ...meta.summaries.map((item) => `- ${item}`)] : []),
     "",

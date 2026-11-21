@@ -2,6 +2,7 @@ export * as HybridExpert from "./expert.js"
 
 import { Effect, Option, Schema } from "effect"
 import EXPERT from "./expert.txt"
+import REVIEW from "./review.txt"
 
 export const Step = Schema.Struct({
   id: Schema.String,
@@ -34,14 +35,71 @@ export interface FailedStep {
   readonly output: string
 }
 
+/** The expert's judgement of a finished turn, from its real tool output. */
+export const Review = Schema.Struct({
+  verdict: Schema.Literals(["success", "partial", "failed"]),
+  score: Schema.optionalKey(Schema.Finite),
+  reason: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  lessons: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+})
+export type Review = typeof Review.Type
+
+export interface ReviewedStep {
+  readonly actor: string
+  /** The shell command, or a short summary of another tool's input, already redacted. */
+  readonly summary: string
+  readonly ok: boolean
+  readonly output: string
+}
+
 const decodePlan = Schema.decodeUnknownOption(Schema.fromJsonString(Plan))
+const decodeReview = Schema.decodeUnknownOption(Schema.fromJsonString(Review))
+const REVIEW_STEPS = 40
+const REVIEW_OUTPUT_LINES = 8
+const MAX_LESSONS = 5
+
+export function parse(text: string) {
+  return Option.getOrUndefined(decodePlan(jsonObject(text)))
+}
+
+export function parseReview(text: string) {
+  const review = Option.getOrUndefined(decodeReview(jsonObject(text)))
+  return review && { ...review, lessons: review.lessons.filter((item) => item.trim().length > 0).slice(0, MAX_LESSONS) }
+}
 
 // Experts sometimes wrap the JSON in a code fence or add a sentence around it.
-export function parse(text: string) {
+function jsonObject(text: string) {
   const start = text.indexOf("{")
   const end = text.lastIndexOf("}")
-  if (start === -1 || end < start) return undefined
-  return Option.getOrUndefined(decodePlan(text.slice(start, end + 1)))
+  return start === -1 || end < start ? "" : text.slice(start, end + 1)
+}
+
+export function reviewPrompt(input: {
+  readonly environment: Environment
+  readonly task: string
+  readonly plans: ReadonlyArray<readonly [string, Plan]>
+  readonly executed: ReadonlyArray<ReviewedStep>
+}) {
+  const steps = input.executed.slice(-REVIEW_STEPS)
+  return render(REVIEW, {
+    os: input.environment.os,
+    arch: input.environment.arch,
+    shell: input.environment.shell,
+    cwd: input.environment.cwd,
+    task: escape(input.task),
+    plans: input.plans
+      .map(([id, plan]) => `<plan id="${escape(id)}">\n${escape(JSON.stringify(plan))}\n</plan>\n`)
+      .join(""),
+    executed: [
+      ...(input.executed.length > steps.length ? [`[${input.executed.length - steps.length} earlier steps omitted]`] : []),
+      ...steps.map((step, index) =>
+        [
+          `${index + 1}. [${step.ok ? "ok" : "FAILED"}] (${step.actor}) ${escape(step.summary)}`,
+          ...(step.output.trim() ? [escape(tail(step.output.trim(), REVIEW_OUTPUT_LINES)).replace(/^/gm, "   ")] : []),
+        ].join("\n"),
+      ),
+    ].join("\n"),
+  })
 }
 
 export function prompt(input: {

@@ -45,6 +45,10 @@ export interface Turn {
   readonly consults: number
   readonly durationMs?: number
   readonly learned?: string
+  /** The expert's review of the turn, when it reviewed it. */
+  readonly review?: { readonly verdict: string; readonly reason: string; readonly lessons: ReadonlyArray<string> }
+  /** The user's latest rating of the turn. */
+  readonly rating?: { readonly rating: string; readonly note?: string }
   readonly timeline: ReadonlyArray<TimelineEntry>
 }
 
@@ -99,6 +103,10 @@ export interface Summary {
     readonly expertMs: number
     readonly learned: number
     readonly triggers: number
+    /** Expert review verdicts: success, partial, failed. */
+    readonly reviews: Record<string, number>
+    /** User ratings: good, partial, bad. */
+    readonly ratings: Record<string, number>
   }
   readonly daily: ReadonlyArray<{ readonly day: string; readonly handledBy: Record<string, number> }>
   readonly consults: ReadonlyArray<Consult>
@@ -128,6 +136,8 @@ export function summarize(events: ReadonlyArray<Event>): Summary {
       expertMs: consults.reduce((total, item) => total + (item.durationMs ?? 0), 0),
       learned: ordered.filter((event) => event.type === "skill.created").length,
       triggers: ordered.filter((event) => event.type === "trigger.fired").length,
+      reviews: count(turns.flatMap((turn) => (turn.review ? [turn.review.verdict] : []))),
+      ratings: count(turns.flatMap((turn) => (turn.rating ? [turn.rating.rating] : []))),
     },
     daily: Object.entries(
       finished.reduce<Record<string, string[]>>((days, turn) => {
@@ -181,6 +191,16 @@ export function describe(event: Event): string {
       return `skill ${text(data.skill_id)}: ${text(data.outcome)}`
     case "turn.finished":
       return `finished: ${text(data.outcome)}, handled by ${text(data.handled_by)}, ${text(data.consults)} consult(s)`
+    case "expert.reviewed":
+      return data.parse_ok === true
+        ? `expert review: ${text(data.verdict)}${typeof data.score === "number" ? ` (${data.score})` : ""} · ${oneLine(text(data.reason), 120)}${Array.isArray(data.lessons) && data.lessons.length ? ` · ${data.lessons.length} lesson(s)` : ""}`
+        : "expert review was not structured"
+    case "expert.review_failed":
+      return "expert review failed"
+    case "feedback.requested":
+      return "asked the user to rate the turn"
+    case "human.feedback":
+      return `user rated it ${text(data.rating)}${text(data.note) ? `: "${oneLine(text(data.note), 120)}"` : ""}${isRecord(data.status) && data.status.from !== data.status.to ? ` · skill ${text(data.status.from)} → ${text(data.status.to)}` : ""}`
     case "trace.level":
       return `trace level set to ${text(data.level)}`
     default:
@@ -200,6 +220,8 @@ function turnsOf(events: ReadonlyArray<Event>): Turn[] {
       const first = items[0]!
       const started = items.find((event) => event.type === "turn.started")
       const finished = items.findLast((event) => event.type === "turn.finished")
+      const reviewed = items.findLast((event) => event.type === "expert.reviewed" && event.data.parse_ok === true)
+      const rated = items.findLast((event) => event.type === "human.feedback")
       return {
         sessionID: first.session_id,
         turnID: first.turn_id ?? "",
@@ -212,6 +234,18 @@ function turnsOf(events: ReadonlyArray<Event>): Turn[] {
               ...(finished.duration_ms === undefined ? {} : { durationMs: finished.duration_ms }),
               ...(text(finished.data.learned) ? { learned: text(finished.data.learned) } : {}),
             }
+          : {}),
+        ...(reviewed
+          ? {
+              review: {
+                verdict: text(reviewed.data.verdict),
+                reason: text(reviewed.data.reason),
+                lessons: Array.isArray(reviewed.data.lessons) ? reviewed.data.lessons.map(text) : [],
+              },
+            }
+          : {}),
+        ...(rated
+          ? { rating: { rating: text(rated.data.rating), ...(text(rated.data.note) ? { note: text(rated.data.note) } : {}) } }
           : {}),
         consults: items.filter((event) => event.type === "expert.asked" && event.data.cache_hit !== true).length,
         timeline: items.map((event) => ({
@@ -273,7 +307,7 @@ function failuresOf(events: ReadonlyArray<Event>): Failure[] {
 
 function skillsOf(events: ReadonlyArray<Event>): SkillHistory[] {
   const grouped = events
-    .filter((event) => event.type.startsWith("skill.") && text(event.data.skill_id))
+    .filter((event) => (event.type.startsWith("skill.") || event.type === "human.feedback") && text(event.data.skill_id))
     .reduce((map, event) => {
       const id = text(event.data.skill_id)
       const current = map.get(id)
